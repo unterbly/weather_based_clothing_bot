@@ -99,7 +99,7 @@ def format_weather_reply(data: dict) -> str:
 
     advice = get_clothing_advice(temp, feels_like, weather_id, wind_speed, humidity)
 
-     return (
+    return (
         f"📍 *{city}, {country}*\n"
         f"🌡️ {temp:.0f}°C (відчувається як {feels_like:.0f}°C)\n"
         f"☁️ {description}\n"
