@@ -97,7 +97,7 @@ def format_weather_reply(data: dict) -> str:
     wind_speed = data["wind"]["speed"]
     humidity = data["main"]["humidity"]
 
-    advice = get_clothing_advice(temp, feels_like, weather_id, wind_speed)
+    advice = get_clothing_advice(temp, feels_like, weather_id, wind_speed, humidity)
 
     return (
         f"📍 *{city}, {country}*\n"
