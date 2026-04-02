@@ -72,7 +72,7 @@ def get_clothing_advice(temp: float, feels_like: float, weather_id: int, wind_sp
 
 # --- Weather fetch ---
 async def fetch_weather_by_city(city: str) -> dict:
-    params = {"q": city, "appid": OWM_API_KEY, "units": "metric", "lang": "en"}
+    params = {"q": city, "appid": OWM_API_KEY, "units": "metric", "lang": "uk"}
     async with httpx.AsyncClient() as client:
         r = await client.get(OWM_URL, params=params, timeout=10)
         r.raise_for_status()
@@ -80,7 +80,7 @@ async def fetch_weather_by_city(city: str) -> dict:
 
 
 async def fetch_weather_by_coords(lat: float, lon: float) -> dict:
-    params = {"lat": lat, "lon": lon, "appid": OWM_API_KEY, "units": "metric", "lang": "en"}
+    params = {"lat": lat, "lon": lon, "appid": OWM_API_KEY, "units": "metric", "lang": "uk"}
     async with httpx.AsyncClient() as client:
         r = await client.get(OWM_URL, params=params, timeout=10)
         r.raise_for_status()
@@ -99,13 +99,13 @@ def format_weather_reply(data: dict) -> str:
 
     advice = get_clothing_advice(temp, feels_like, weather_id, wind_speed, humidity)
 
-    return (
+     return (
         f"📍 *{city}, {country}*\n"
-        f"🌡️ {temp:.0f}°C (feels like {feels_like:.0f}°C)\n"
+        f"🌡️ {temp:.0f}°C (відчувається як {feels_like:.0f}°C)\n"
         f"☁️ {description}\n"
-        f"💧 Humidity: {humidity}%\n"
-        f"💨 Wind: {wind_speed:.0f} m/s\n\n"
-        f"*What to wear:*\n{advice}"
+        f"💧 Вологість: {humidity}%\n"
+        f"💨 Вітер: {wind_speed:.0f} м/с\n\n"
+        f"*Що вдягнути:*\n{advice}"
     )
 
 
