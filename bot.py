@@ -16,8 +16,6 @@ OWM_API_KEY = os.environ["OWM_API_KEY"]
 OWM_CURRENT_URL = "https://api.openweathermap.org/data/2.5/weather"
 OWM_FORECAST_URL = "https://api.openweathermap.org/data/2.5/forecast"
 USERS_FILE = "users.json"
-MORNING_HOUR = 7
-MORNING_MINUTE = 30
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -38,8 +36,16 @@ def save_users(users: dict):
 
 def save_user_city(chat_id: int, city: str, lat: float = None, lon: float = None):
     users = load_users()
-    users[str(chat_id)] = {"city": city, "lat": lat, "lon": lon}
+    uid = str(chat_id)
+    if uid not in users:
+        users[uid] = {"notify_hour": 7, "notify_minute": 30, "active": True}
+    users[uid].update({"city": city, "lat": lat, "lon": lon, "active": True})
     save_users(users)
+
+
+def get_user(chat_id: int) -> dict | None:
+    users = load_users()
+    return users.get(str(chat_id))
 
 
 # --- Clothing logic ---
@@ -160,11 +166,9 @@ def format_morning_forecast(forecast_data: dict) -> str:
     for item in forecast_data["list"]:
         dt_txt = item["dt_txt"]
         hour = int(dt_txt[11:13])
-
         for t in target_hours:
             if hour == t and t not in slots:
                 slots[t] = item
-
         if len(slots) == 3:
             break
 
@@ -196,19 +200,83 @@ def format_morning_forecast(forecast_data: dict) -> str:
     return "\n".join(lines)
 
 
-# --- Morning job ---
+# --- Weather change detection ---
+def detect_weather_changes(forecast_data: dict) -> list[str]:
+    """Detect significant weather changes in the next 12 hours."""
+    alerts = []
+    items = forecast_data["list"][:4]  # next 12 hours (every 3h)
+
+    if len(items) < 2:
+        return alerts
+
+    first = items[0]
+    first_temp = first["main"]["feels_like"]
+    first_id = first["weather"][0]["id"]
+
+    for item in items[1:]:
+        temp = item["main"]["feels_like"]
+        weather_id = item["weather"][0]["id"]
+        dt_txt = item["dt_txt"][11:16]
+
+        # Significant temperature drop
+        if first_temp - temp >= 7:
+            alerts.append(f"🌡️ О {dt_txt} температура різко впаде на {first_temp - temp:.0f}°C — одягнись тепліше.")
+            break
+
+        # Rain incoming
+        if first_id < 500 and 500 <= weather_id < 600:
+            alerts.append(f"🌧️ О {dt_txt} очікується дощ — візьми парасольку.")
+            break
+
+        # Storm incoming
+        if first_id >= 300 and 200 <= weather_id < 300:
+            alerts.append(f"⛈️ О {dt_txt} очікується гроза — краще залишись вдома.")
+            break
+
+        # Snow incoming
+        if first_id < 600 and 600 <= weather_id < 700:
+            alerts.append(f"❄️ О {dt_txt} очікується сніг — одягни відповідне взуття.")
+            break
+
+    return alerts
+
+
+# --- Jobs ---
 async def send_morning_forecasts(context):
     users = load_users()
     for chat_id, user_data in users.items():
+        if not user_data.get("active", True):
+            continue
         try:
             if user_data.get("lat") and user_data.get("lon"):
                 data = await fetch_forecast_by_coords(user_data["lat"], user_data["lon"])
             else:
                 data = await fetch_forecast_by_city(user_data["city"])
+
             msg = format_morning_forecast(data)
+
+            # Append weather change alerts
+            alerts = detect_weather_changes(data)
+            if alerts:
+                msg += "\n⚠️ *Увага на сьогодні:*\n" + "\n".join(alerts)
+
             await context.bot.send_message(chat_id=int(chat_id), text=msg, parse_mode="Markdown")
         except Exception as e:
             logger.error(f"Morning forecast failed for {chat_id}: {e}")
+
+
+def schedule_user_job(app, chat_id: int, hour: int, minute: int):
+    """Remove existing job for user and schedule a new one."""
+    job_name = f"morning_{chat_id}"
+    current_jobs = app.job_queue.get_jobs_by_name(job_name)
+    for job in current_jobs:
+        job.schedule_removal()
+
+    app.job_queue.run_daily(
+        send_morning_forecasts,
+        time=time(hour, minute),
+        name=job_name,
+    )
 
 
 # --- Handlers ---
@@ -216,13 +284,54 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [[KeyboardButton("📍 Поділитися локацією", request_location=True)]]
     markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     await update.message.reply_text(
-        "👋 Надішли мені назву *міста* або поділися *локацією*, "
-        "і я скажу що вдягнути сьогодні.\n\n"
-        "Також щодня о *7:30* я надсилатиму прогноз на ранок, день і вечір — "
-        "для цього просто надішли своє місто або локацію один раз.",
+        "👋 Надішли мені назву *міста* або поділися *локацією*.\n\n"
+        "Команди:\n"
+        "/stop — зупинити ранкові сповіщення\n"
+        "/start — відновити сповіщення\n"
+        "/settime 7:30 — змінити час сповіщення",
         parse_mode="Markdown",
         reply_markup=markup,
     )
+
+
+async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    users = load_users()
+    uid = str(update.message.chat_id)
+    if uid in users:
+        users[uid]["active"] = False
+        save_users(users)
+    await update.message.reply_text("🔕 Ранкові сповіщення вимкнено. Щоб увімкнути знову — надішли /start.")
+
+
+async def cmd_settime(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("Використання: /settime 7:30")
+        return
+
+    try:
+        parts = context.args[0].split(":")
+        hour = int(parts[0])
+        minute = int(parts[1])
+        if not (0 <= hour <= 23 and 0 <= minute <= 59):
+            raise ValueError
+    except (ValueError, IndexError):
+        await update.message.reply_text("❌ Невірний формат. Використання: /settime 7:30")
+        return
+
+    users = load_users()
+    uid = str(update.message.chat_id)
+    if uid not in users:
+        await update.message.reply_text("⚠️ Спочатку надішли своє місто або локацію.")
+        return
+
+    users[uid]["notify_hour"] = hour
+    users[uid]["notify_minute"] = minute
+    users[uid]["active"] = True
+    save_users(users)
+
+    schedule_user_job(context.application, update.message.chat_id, hour, minute)
+
+    await update.message.reply_text(f"✅ Час сповіщення змінено на *{hour:02d}:{minute:02d}*.", parse_mode="Markdown")
 
 
 async def handle_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -230,8 +339,14 @@ async def handle_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         data = await fetch_weather_by_coords(loc.latitude, loc.longitude)
         save_user_city(update.message.chat_id, data["name"], loc.latitude, loc.longitude)
+
+        user = get_user(update.message.chat_id)
+        hour = user.get("notify_hour", 7)
+        minute = user.get("notify_minute", 30)
+        schedule_user_job(context.application, update.message.chat_id, hour, minute)
+
         await update.message.reply_text(
-            format_weather_reply(data) + "\n\n✅ _Локацію збережено. Щодня о 7:30 надсилатиму прогноз._",
+            format_weather_reply(data) + f"\n\n✅ _Локацію збережено. Щодня о {hour:02d}:{minute:02d} надсилатиму прогноз._",
             parse_mode="Markdown"
         )
     except Exception as e:
@@ -244,8 +359,14 @@ async def handle_city(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         data = await fetch_weather_by_city(city)
         save_user_city(update.message.chat_id, data["name"])
+
+        user = get_user(update.message.chat_id)
+        hour = user.get("notify_hour", 7)
+        minute = user.get("notify_minute", 30)
+        schedule_user_job(context.application, update.message.chat_id, hour, minute)
+
         await update.message.reply_text(
-            format_weather_reply(data) + "\n\n✅ _Місто збережено. Щодня о 7:30 надсилатиму прогноз._",
+            format_weather_reply(data) + f"\n\n✅ _Місто збережено. Щодня о {hour:02d}:{minute:02d} надсилатиму прогноз._",
             parse_mode="Markdown"
         )
     except httpx.HTTPStatusError as e:
@@ -262,12 +383,17 @@ async def handle_city(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
 
-    app.job_queue.run_daily(
-        send_morning_forecasts,
-        time=time(MORNING_HOUR, MORNING_MINUTE)
-    )
+    # Schedule jobs for all existing users on startup
+    users = load_users()
+    for chat_id, user_data in users.items():
+        if user_data.get("active", True) and user_data.get("city"):
+            hour = user_data.get("notify_hour", 7)
+            minute = user_data.get("notify_minute", 30)
+            schedule_user_job(app, int(chat_id), hour, minute)
 
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("stop", cmd_stop))
+    app.add_handler(CommandHandler("settime", cmd_settime))
     app.add_handler(MessageHandler(filters.LOCATION, handle_location))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_city))
 
